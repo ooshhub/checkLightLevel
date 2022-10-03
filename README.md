@@ -7,7 +7,7 @@ Usage: `!checkLight`
 
 From other scripts: `checkLightLevel.litBy(tokenOrId)`
 
-  `/**
+  ```/**
    * @typedef {object} LitBy
    * @property {?boolean} bright - token is lit by bright light, null on error
    * @property {?boolean} dim - token is lit by dim light, null on error
@@ -18,4 +18,4 @@ From other scripts: `checkLightLevel.litBy(tokenOrId)`
    * @returns {LitBy}
    */
    isLityBy(tokenOrTokenId)
-`
+```
