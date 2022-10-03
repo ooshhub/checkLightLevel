@@ -100,12 +100,12 @@ const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
   }
 
   const checkLightLevelOfToken = (token) => {
+    if (typeof(PathMath) !== 'object') return { err: `Aborted - This script requires PathMath.` };
     const tokenPage = getPageOfToken(token),
       litBy = { bright: false, dim: false, global: false };
     // console.info(tokenPage);
-    if (!tokenPage || !tokenPage.id) return null;
+    if (!tokenPage || !tokenPage.id) return { err: `Couldn't find token or token page.` };
     litBy.global = checkGlobalIllumination(tokenPage);
-    if (litBy.global > 0.90) return litBy;
     const allTokens = findObjs({ type: 'graphic', _pageid: tokenPage.id }),
       allLightTokens = allTokens.filter(token => (token.get('emits_bright_light') || token.get('emits_low_light')));
     // console.log(allLightTokens);
@@ -121,7 +121,7 @@ const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
         brightRange = feetToPixels(brightRangeFeet, tokenPage),
         dimRange = feetToPixels(dimRangeFeet, tokenPage);
       // console.info(tokenSeparation, brightRange, dimRange);
-      if (brightRange == null || dimRange == null) return null;
+      if (brightRange == null || dimRange == null) continue;
       if (tokenSeparation <= brightRange) {
         litBy.bright = true;
         break;
@@ -134,13 +134,16 @@ const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
   }
     
   const handleInput = (msg) => {
-    if (typeof(PathMath) !== 'object') return;
+    // if (typeof(PathMath) !== 'object') return;
     if (msg.type === 'api' && /!checklight/i.test(msg.content) && playerIsGM(msg.playerid)) {
       const token = getSelectedToken(msg.selected || []);
       if (!token) return postChat(`Nothing selected.`);
       const checkResult = checkLightLevelOfToken(token),
         tokenName = token.get('name');
-      if (!checkResult) postChat(`Couldn't find token's current page, or bad page data.`);
+      if (checkResult.err) {
+        postChat(checkResult.err);
+        return;
+      }
       let messages = [];
       if (checkResult.global) messages.push(`${tokenName} is in ${(checkResult.global*100).toFixed(1)}% global light.`);
       if (checkResult.bright) messages.push(`${tokenName} is in direct bright light.`);
@@ -179,10 +182,10 @@ const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
    * @typedef {object} LitBy
    * @property {?boolean} bright - token is lit by bright light, null on error
    * @property {?boolean} dim - token is lit by dim light, null on error
-   * @property {?float} global - token is in <float>% daylight, false on no daylight, null on error
+   * @property {?float} global - token is in <float between 0 and 1> daylight, false on no daylight, null on error
    * @property {?string} err - error message, only on error
    * 
-   * @param {string | object} tokenOrTokenId 
+   * @param {string | object} tokenOrTokenId - Roll20 Token object, or token UID string
    * @returns {LitBy}
    */
   const isLitBy = (tokenOrTokenId) => {
