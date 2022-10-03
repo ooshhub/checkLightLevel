@@ -3,7 +3,7 @@
 const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
 
   const scriptName = 'checkLightLevel',
-    scriptVersion = '0.3.0';
+    scriptVersion = '0.3.1';
 
   const getSelectedToken = (selected) => {
     const selectedId = selected[0] ? selected[0]._id : null
@@ -78,13 +78,12 @@ const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
         losSegments = losPath.toSegments();
       // console.warn(wallSegments, losSegments);
       for (let w=0; w<wallSegments.length; w++) {
-        // console.info(wallSegments[w]);
+        if (losBlocked) break;
         const skipOneWaySegment = isOneWayWall ? isOneWayAndTransparent(wallSegments[w], lightFlowAngle, oneWayReversed) : false;
         if (skipOneWaySegment) {
           // console.info('skipping due to one-way transparency');
           continue;
         }
-        if (losBlocked) break;
         for (let l=0; l<losSegments.length; l++) {
           const intersect = PathMath.segmentIntersection(wallSegments[w], losSegments[l]);//wallPath.intersects(losPath);
           if (intersect) {
