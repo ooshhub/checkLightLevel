@@ -3,10 +3,10 @@
 const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
 
   const scriptName = 'checkLightLevel',
-    scriptVersion = '0.4.0';
+    scriptVersion = '0.4.1';
 
   const getSelectedToken = (selected) => {
-    const selectedId = selected[0] ? selected[0]._id : null
+    const selectedId = selected && selected[0] ? selected[0]._id : null
     return selectedId ? getObj('graphic', selectedId) : null;
   }
 
@@ -123,7 +123,7 @@ const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
     litBy.daylight = checkGlobalIllumination(tokenPage);
     if (litBy.daylight) litBy.total += litBy.daylight;
     const allTokens = findObjs({ type: 'graphic', _pageid: tokenPage.id }),
-      allLightTokens = allTokens.filter(token => (token.get('emits_bright_light') || token.get('emits_low_light')));
+      allLightTokens = allTokens.filter(token => (token.get('emits_bright_light') || token.get('emits_low_light')) && token.get('layer') !== 'gmlayer');
     // console.log(allLightTokens);
     for (let i=0; i<allLightTokens.length; i++) {
       if (litBy.bright || litBy.total >= 1) break;
@@ -160,7 +160,7 @@ const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
       const token = getSelectedToken(msg.selected || []);
       if (!token) return postChat(`Nothing selected.`);
       const checkResult = checkLightLevelOfToken(token),
-        tokenName = token.get('name');
+        tokenName = token.get('name') || 'Nameless Token';
       if (checkResult.err) {
         postChat(checkResult.err);
         return;
@@ -170,11 +170,11 @@ const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
       if (checkResult.bright) messages.push(`${tokenName} is in direct bright light.`);
       else if (checkResult.dim.length) messages.push(`${tokenName} is in ${checkResult.total >= 1 ? `at least ` : ''}${checkResult.dim.length} sources of dim light.`);
       else if (!checkResult.daylight) messages.push(`${tokenName} is in darkness.`);
-      if (checkResult.total > 0) messages.push(`${tokenName} is in ${parseInt(checkResult.total*100)}% total light level.`)
+      if (!checkResult.bright && checkResult.total > 0) messages.push(`${tokenName} is in ${parseInt(checkResult.total*100)}% total light level.`)
       if (messages.length) {
         let opacity = checkResult.bright ? 1
-          : checkResult.dim ? 0.5
-          : 0.1;
+          : checkResult.total > 0.2 ? checkResult.total
+          : 0.2;
         if (typeof(checkResult.daylight) === 'number') opacity = Math.max(checkResult.daylight.toFixed(2), opacity);
         const chatMessage = createChatTemplate(token, messages, opacity);
         postChat(chatMessage);
@@ -229,12 +229,11 @@ const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
     if (!token || !token.id) err.push(`checklight plugin: no selected token`);
     else {
       const checkResult = checkLightLevelOfToken(token);
-      return parseInt(checkResult.total*100);
+      return typeof(checkResult.total) === 'number' ? parseFloat(checkResult.total).toFixed(4) : 0;
     }
     if (err.length) err.forEach(e => log(e));
     return '';
   }
-
   const registerWithMetaToolbox = () => {
     try {
       Plugger.RegisterRule(checklight);
