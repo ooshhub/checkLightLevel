@@ -1,9 +1,9 @@
-/* globals on findObjs getObj playerIsGM log sendChat PathMath */
+/* globals on findObjs getObj playerIsGM log sendChat PathMath Plugger */
 
 const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
 
   const scriptName = 'checkLightLevel',
-    scriptVersion = '0.3.1';
+    scriptVersion = '0.4.0';
 
   const getSelectedToken = (selected) => {
     const selectedId = selected[0] ? selected[0]._id : null
@@ -98,21 +98,38 @@ const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
     return losBlocked;
   }
 
+  /**
+   * Use cubic fade out to approximate the light level in dim light at different ranges
+   * @param {integer} tokenSeparation - pixel distance, center to center
+   * @param {integer} dimLightRadius - pixel radius of dim light from the emitter
+   * @param {integer} brightLightRadius - pixel radius of bright light from the emitter
+   * @returns {float} - light level multiplier, 0 - 1isLitBy
+   */
+  const getDimLightFalloff = (tokenSeparation, dimLightRadius, brightLightRadius, gridPixelSize) => {
+    const dimLightOnlyRadius = (dimLightRadius - brightLightRadius) + gridPixelSize/2,
+      tokenDimLightDistance = tokenSeparation - brightLightRadius;
+    const lightLevelWithFalloff = (1-(tokenDimLightDistance/dimLightOnlyRadius)**3) * 0.5;
+    // console.info(tokenDimLightDistance, dimLightOnlyRadius, lightLevelWithFalloff);
+    return lightLevelWithFalloff;
+  }
+
   const checkLightLevelOfToken = (token) => {
     if (typeof(PathMath) !== 'object') return { err: `Aborted - This script requires PathMath.` };
     const tokenPage = getPageOfToken(token),
-      litBy = { bright: false, dim: false, global: false };
+      litBy = { bright: false, dim: [], daylight: false, total: 0 };
     // console.info(tokenPage);
+    const gridPixelSize = tokenPage.get('snapping_increment') * 70;
     if (!tokenPage || !tokenPage.id) return { err: `Couldn't find token or token page.` };
-    litBy.global = checkGlobalIllumination(tokenPage);
+    litBy.daylight = checkGlobalIllumination(tokenPage);
+    if (litBy.daylight) litBy.total += litBy.daylight;
     const allTokens = findObjs({ type: 'graphic', _pageid: tokenPage.id }),
       allLightTokens = allTokens.filter(token => (token.get('emits_bright_light') || token.get('emits_low_light')));
     // console.log(allLightTokens);
     for (let i=0; i<allLightTokens.length; i++) {
+      if (litBy.bright || litBy.total >= 1) break;
       const tokenSeparation = getTokenSeparation(token, allLightTokens[i]),
         losBlocked = checkLineOfSight(token, allLightTokens[i], tokenSeparation, tokenPage);
       if (losBlocked) {
-        // console.warn(`LOS blocked to emitter "${allLightTokens[i].name}"`);
         continue;
       }
       const brightRangeFeet = allLightTokens[i].get('bright_light_distance'),
@@ -123,16 +140,21 @@ const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
       if (brightRange == null || dimRange == null) continue;
       if (tokenSeparation <= brightRange) {
         litBy.bright = true;
+        litBy.total = 1;
         break;
       }
       else if (tokenSeparation <= dimRange) {
-        litBy.dim = true;
+        litBy.dim.push(allLightTokens[i]);
+        litBy.total += getDimLightFalloff(tokenSeparation, dimRange, brightRange, gridPixelSize);
       }
     }
+    litBy.total = Math.min(litBy.total, 1);
     return litBy;
   }
     
   const handleInput = (msg) => {
+    // console.log(msg);
+    // if (msg.eval) handleMetaRequest(msg);
     // if (typeof(PathMath) !== 'object') return;
     if (msg.type === 'api' && /!checklight/i.test(msg.content) && playerIsGM(msg.playerid)) {
       const token = getSelectedToken(msg.selected || []);
@@ -144,15 +166,16 @@ const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
         return;
       }
       let messages = [];
-      if (checkResult.global) messages.push(`${tokenName} is in ${(checkResult.global*100).toFixed(1)}% global light.`);
+      if (checkResult.daylight) messages.push(`${tokenName} is in ${(checkResult.daylight*100).toFixed(0)}% global light.`);
       if (checkResult.bright) messages.push(`${tokenName} is in direct bright light.`);
-      else if (checkResult.dim) messages.push(`${tokenName} is in direct dim light.`);
-      else if (!checkResult.global) messages.push(`${tokenName} is in darkness.`);
+      else if (checkResult.dim.length) messages.push(`${tokenName} is in ${checkResult.total >= 1 ? `at least ` : ''}${checkResult.dim.length} sources of dim light.`);
+      else if (!checkResult.daylight) messages.push(`${tokenName} is in darkness.`);
+      if (checkResult.total > 0) messages.push(`${tokenName} is in ${parseInt(checkResult.total*100)}% total light level.`)
       if (messages.length) {
         let opacity = checkResult.bright ? 1
           : checkResult.dim ? 0.5
           : 0.1;
-        if (typeof(checkResult.global) === 'number') opacity = Math.max(checkResult.global.toFixed(2), opacity);
+        if (typeof(checkResult.daylight) === 'number') opacity = Math.max(checkResult.daylight.toFixed(2), opacity);
         const chatMessage = createChatTemplate(token, messages, opacity);
         postChat(chatMessage);
       }
@@ -180,15 +203,16 @@ const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
   /**
    * @typedef {object} LitBy
    * @property {?boolean} bright - token is lit by bright light, null on error
-   * @property {?boolean} dim - token is lit by dim light, null on error
-   * @property {?float} global - token is in <float between 0 and 1> daylight, false on no daylight, null on error
+   * @property {?array} dim - dim light emitters found to be illuminating selected token, null on error
+   * @property {?float} daylight - token is in <float between 0 and 1> daylight, false on no daylight, null on error
+   * @property {?float} total - total light multiplier from adding all sources, max 1, null on error
    * @property {?string} err - error message, only on error
    * 
    * @param {string | object} tokenOrTokenId - Roll20 Token object, or token UID string
    * @returns {LitBy}
    */
   const isLitBy = (tokenOrTokenId) => {
-    const output = { bright: null, dim: null, global: null }
+    const output = { bright: null, dim: null, daylight: null, total: null }
     const token = tokenOrTokenId && typeof(tokenOrTokenId) === 'object' && tokenOrTokenId.id ? tokenOrTokenId
       : typeof(tokenOrTokenId) === 'string' ? getObj('graphic', tokenOrTokenId)
       : null;
@@ -198,7 +222,29 @@ const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
     return output;
   }
 
+  // Meta toolbox plugin
+  const checklight = (msg) => {
+    const err = [];
+    const token = getSelectedToken(msg.selected);
+    if (!token || !token.id) err.push(`checklight plugin: no selected token`);
+    else {
+      const checkResult = checkLightLevelOfToken(token);
+      return parseInt(checkResult.total*100);
+    }
+    if (err.length) err.forEach(e => log(e));
+    return '';
+  }
+
+  const registerWithMetaToolbox = () => {
+    try {
+      Plugger.RegisterRule(checklight);
+      // console.info(`Registered with Plugger`);
+      }
+    catch (e) { log(`ERROR Registering ${scriptName} with PlugEval: ${e.message}`); }
+  }
+
   on('ready', () => {
+    if (typeof(Plugger) === 'object') registerWithMetaToolbox();
     on('chat:message', handleInput);
     log(`${scriptName} v${scriptVersion}`);
   });
