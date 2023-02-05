@@ -1,24 +1,64 @@
 /* globals on findObjs getObj playerIsGM log sendChat PathMath Plugger */
+var API_Meta = API_Meta || {};
+API_Meta.checkLightLevel = { offset: Number.MAX_SAFE_INTEGER, lineCount: -1 };
+{ try { throw new Error(''); } catch (e) { API_Meta.checkLightLevel.offset = (parseInt(e.stack.split(/\n/)[1].replace(/^.*:(\d+):.*$/, '$1'), 10) - (13)); } }
 
 const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
 
   const scriptName = 'checkLightLevel',
-    scriptVersion = '0.4.2';
+    scriptVersion = '0.5.0',
+    debugLogging = true,
+    consolePassthrough = true;  // set to false if you want debug logs sent to the Roll20 API console (yuck)
 
+  const debug = (() => {
+    const send = (logLevel, ...msgs) => {
+      if (!debugLogging) return;
+      if (consolePassthrough) {
+        console[logLevel](...msgs);
+      }
+      else {
+        msgs.forEach(msg => log(msg));
+      }
+    }
+    return {
+      log: (...msgs) => send('log', ...msgs),
+      info: (...msgs) => send('info', ...msgs),
+      warn: (...msgs) => send('warn', ...msgs),
+      error: (...msgs) => send('error', ...msgs)
+    }
+  })();
+
+  /**
+   * @param {object[]} selected array of simple token objects
+   * @returns {object[] | null} array of actual token objects
+   */
   const getSelectedTokens = (selected) => {
     const selectedIds = selected && selected.length ? selected.map(sel => sel._id) : null
     return selectedIds ? selectedIds.map(id => getObj('graphic', id)) : null;
   }
 
+  /**
+   * @param {object} token token object
+   * @returns {object|null} page object
+   */
   const getPageOfToken = (token) => token && token.id ? getObj('page', token.get('_pageid')) : null;
 
+  /**
+   * @param {object} point1 { x: number, y: number }
+   * @param {object} point2 { x: number, y: number }
+   * @returns 
+   */
   const getSeparation = (point1, point2) => {
     const delta = { x: point1.x - point2.x, y: point1.y - point2.y },
     distance = Math.sqrt(delta.x**2 + delta.y**2);
-    // console.info(pos1, pos2, delta, distance);
     return distance;
   }
 
+  /**
+   * @param {object} token1 token object
+   * @param {object} token2 token object
+   * @returns {number} separation in pixels
+   */
   const getTokenSeparation = (token1, token2) => {
     if (!token1 || !token2) return;
     const pos1 = { x: parseInt(token1.get('left')), y: parseInt(token1.get('top')) },
@@ -27,35 +67,71 @@ const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
     return getSeparation(pos1, pos2);
   }
 
+  /**
+   * @param {number} feetValue distance in feet
+   * @param {object} page map page object
+   * @returns {number} pixel distance
+   */
   const feetToPixels = (feetValue, page) => {
     if (!page) return null;
     const gridPixelMultiplier = page.get('snapping_increment'),
       gridUnitScale = page.get('scale_number');
     const pixelValue = feetValue/gridUnitScale*(gridPixelMultiplier*70);
-    // console.warn(`pixel distance: ${pixelValue}`);
+    debug.info(`Pixel distance: ${pixelValue}`);
     return pixelValue;
   }
 
+  /**
+   * @param {object} page map page object
+   * @returns {boolean}
+   */
   const checkGlobalIllumination = (page) => {
     if (!page || !page.id) return false;
     return page.get('daylight_mode_enabled') ? parseFloat(page.get('daylightModeOpacity')) : false;
   }
 
+  /**
+   * Check if a one way wall is allowing light through in the correct direction
+   * @param {object} segment path segment
+   * @param {number} lightFlowAngle 
+   * @param {boolean} oneWayReversed 
+   * @returns {boolean}
+   */
   const isOneWayAndTransparent = (segment, lightFlowAngle, oneWayReversed) => {
     if (!segment || segment.length < 2) return;
     const delta = { x: segment[1][0] - segment[0][0], y: segment[0][1] - segment[1][1] }
     const segmentAngle = getAngleFromX(delta.x, delta.y);
-    // console.info(`Segment angle is ${segmentAngle}`);
-    const transparencyAngle = oneWayReversed ? segmentAngle - 90 : segmentAngle + 90;
+    debug.info(`Segment angle is ${segmentAngle}`);
+    const transparencyAngle = oneWayReversed
+      ? segmentAngle - 90
+      : segmentAngle + 90;
     const angleDifference = Math.abs(transparencyAngle - lightFlowAngle);
-    // console.warn(`Transparency diff ${angleDifference}`);
+    debug.warn(`Transparency diff ${angleDifference}`);
     return angleDifference < 90 ? true : false;
   }
 
+  /**
+   * @param {number} rads radians
+   * @returns {number} degrees
+   */
   const toDegrees = (rads) => rads*180/Math.PI;
 
+  /**
+   * Get the angle from the x axis to the line drawn to (x,y) from origin
+   * @param {number} x 
+   * @param {number} y 
+   * @returns {number} radians
+   */
   const getAngleFromX = (x, y) => toDegrees(Math.atan2(y, x));
 
+  /**
+   * Check for LOS blocking walls between token and light source
+   * @param {object} token1 token object
+   * @param {object} token2 token object
+   * @param {number} range pixel range
+   * @param {object} page map page object
+   * @returns {null|object} returns null if no LOS block, or first path object which blocks the light source
+   */
   const checkLineOfSight = (token1, token2, range, page) => {
     const pos1 = { x: parseInt(token1.get('left')), y: parseInt(token1.get('top')) },
       pos2 = { x: parseInt(token2.get('left')), y: parseInt(token2.get('top')) },
@@ -73,21 +149,19 @@ const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
         pathLeft = blockingPaths[i].get('left') - (blockingPaths[i].get('width')/2);
       const pathVertices = pathData.map(vertex => [ vertex[1] + pathLeft, vertex[2] + pathTop, 0 ]);
       const wallPath = new PathMath.Path(pathVertices);
-      // console.info(losPath, wallPath);
       const wallSegments = wallPath.toSegments(),
         losSegments = losPath.toSegments();
-      // console.warn(wallSegments, losSegments);
       for (let w=0; w<wallSegments.length; w++) {
         if (losBlocked) break;
         const skipOneWaySegment = isOneWayWall ? isOneWayAndTransparent(wallSegments[w], lightFlowAngle, oneWayReversed) : false;
         if (skipOneWaySegment) {
-          // console.info('skipping due to one-way transparency');
+          debug.info('Skipping segment due to one-way transparency');
           continue;
         }
         for (let l=0; l<losSegments.length; l++) {
           const intersect = PathMath.segmentIntersection(wallSegments[w], losSegments[l]);//wallPath.intersects(losPath);
           if (intersect) {
-            // console.warn(`Found intersect, skipping light source`, blockingPaths[i]);
+            debug.info(`Found intersect, skipping light source`, blockingPaths[i]);
             losBlocked = blockingPaths[i];
             break;
           }
@@ -100,31 +174,32 @@ const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
 
   /**
    * Use cubic fade out to approximate the light level in dim light at different ranges
-   * @param {integer} tokenSeparation - pixel distance, center to center
-   * @param {integer} dimLightRadius - pixel radius of dim light from the emitter
-   * @param {integer} brightLightRadius - pixel radius of bright light from the emitter
-   * @returns {float} - light level multiplier, 0 - 1isLitBy
+   * @param {number} tokenSeparation - pixel distance, center to center
+   * @param {number} dimLightRadius - pixel radius of dim light from the emitter
+   * @param {number} brightLightRadius - pixel radius of bright light from the emitter
+   * @returns {number} - light level multiplier, 0 - 1
    */
   const getDimLightFalloff = (tokenSeparation, dimLightRadius, brightLightRadius, gridPixelSize) => {
     const dimLightOnlyRadius = (dimLightRadius - brightLightRadius) + gridPixelSize/2,
       tokenDimLightDistance = tokenSeparation - brightLightRadius;
     const lightLevelWithFalloff = (1-(tokenDimLightDistance/dimLightOnlyRadius)**3) * 0.5;
-    // console.info(tokenDimLightDistance, dimLightOnlyRadius, lightLevelWithFalloff);
     return lightLevelWithFalloff;
   }
 
+  /**
+   * @param {object} token token object 
+   * @returns 
+   */
   const checkLightLevelOfToken = (token) => {
     if (typeof(PathMath) !== 'object') return { err: `Aborted - This script requires PathMath.` };
     const tokenPage = getPageOfToken(token),
       litBy = { bright: false, dim: [], daylight: false, total: 0 };
-    // console.info(tokenPage);
     const gridPixelSize = tokenPage.get('snapping_increment') * 70;
     if (!tokenPage || !tokenPage.id) return { err: `Couldn't find token or token page.` };
     litBy.daylight = checkGlobalIllumination(tokenPage);
     if (litBy.daylight) litBy.total += litBy.daylight;
     const allTokens = findObjs({ type: 'graphic', _pageid: tokenPage.id }),
       allLightTokens = allTokens.filter(token => (token.get('emits_bright_light') || token.get('emits_low_light')) && token.get('layer') !== 'gmlayer');
-    // console.log(allLightTokens);
     for (let i=0; i<allLightTokens.length; i++) {
       if (litBy.bright || litBy.total >= 1) break;
       const tokenSeparation = getTokenSeparation(token, allLightTokens[i]),
@@ -132,56 +207,66 @@ const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
       if (losBlocked) {
         continue;
       }
-      const brightRangeFeet = allLightTokens[i].get('bright_light_distance'),
-        dimRangeFeet = allLightTokens[i].get('low_light_distance'),
-        brightRange = feetToPixels(brightRangeFeet, tokenPage),
+      const brightRangeFeet = allLightTokens[i].get('emits_bright_light')
+        ? allLightTokens[i].get('bright_light_distance')
+        : 0;
+      const dimRangeFeet = allLightTokens[i].get('emits_low_light')
+          ? allLightTokens[i].get('low_light_distance')
+          : 0;
+      const brightRange = feetToPixels(brightRangeFeet, tokenPage),
         dimRange = feetToPixels(dimRangeFeet, tokenPage);
-      // console.info(tokenSeparation, brightRange, dimRange);
       if (brightRange == null || dimRange == null) continue;
-      if (tokenSeparation <= brightRange) {
+      if (brightRange && tokenSeparation <= brightRange) {
         litBy.bright = true;
         litBy.total = 1;
         break;
       }
-      else if (tokenSeparation <= dimRange) {
+      else if (dimRange && tokenSeparation <= dimRange) {
         litBy.dim.push(allLightTokens[i]);
         litBy.total += getDimLightFalloff(tokenSeparation, dimRange, brightRange, gridPixelSize);
       }
     }
     litBy.total = Math.min(litBy.total, 1);
-    return litBy;
+    return { litBy };
   }
     
   const handleInput = (msg) => {
-    // console.log(msg);
-    // if (msg.eval) handleMetaRequest(msg);
-    // if (typeof(PathMath) !== 'object') return;
     if (msg.type === 'api' && /!checklight/i.test(msg.content) && playerIsGM(msg.playerid)) {
       const tokens = getSelectedTokens(msg.selected || []);
-      if (!tokens) return postChat(`Nothing selected.`);
+      if (!tokens || !tokens.length) return postChat(`Nothing selected.`);
+      if (!tokenPageHasDynamicLighting) return postChat(`Token's page does not have dynamic lighting.`);
       tokens.forEach(token => {
-        const checkResult = checkLightLevelOfToken(token),
+        const { litBy, err } = checkLightLevelOfToken(token),
           tokenName = token.get('name') || 'Nameless Token';
-        if (checkResult.err) {
-          postChat(checkResult.err);
+        if (err) {
+          postChat(err);
           return;
         }
         let messages = [];
-        if (checkResult.daylight) messages.push(`${tokenName} is in ${(checkResult.daylight*100).toFixed(0)}% global light.`);
-        if (checkResult.bright) messages.push(`${tokenName} is in direct bright light.`);
-        else if (checkResult.dim.length) messages.push(`${tokenName} is in ${checkResult.total >= 1 ? `at least ` : ''}${checkResult.dim.length} sources of dim light.`);
-        else if (!checkResult.daylight) messages.push(`${tokenName} is in darkness.`);
-        if (!checkResult.bright && checkResult.total > 0) messages.push(`${tokenName} is in ${parseInt(checkResult.total*100)}% total light level.`)
+        if (litBy.daylight) messages.push(`${tokenName} is in ${(litBy.daylight*100).toFixed(0)}% global light.`);
+        if (litBy.bright) messages.push(`${tokenName} is in direct bright light.`);
+        else if (litBy.dim.length) messages.push(`${tokenName} is in ${litBy.total >= 1 ? `at least ` : ''}${litBy.dim.length} sources of dim light.`);
+        else if (!litBy.daylight) messages.push(`${tokenName} is in darkness.`);
+        if (!litBy.bright && litBy.total > 0) messages.push(`${tokenName} is in ${parseInt(litBy.total*100)}% total light level.`)
         if (messages.length) {
-          let opacity = checkResult.bright ? 1
-            : checkResult.total > 0.2 ? checkResult.total
+          let opacity = litBy.bright ? 1
+            : litBy.total > 0.2 ? litBy.total
             : 0.2;
-          if (typeof(checkResult.daylight) === 'number') opacity = Math.max(checkResult.daylight.toFixed(2), opacity);
+          if (typeof(litBy.daylight) === 'number') opacity = Math.max(litBy.daylight.toFixed(2), opacity);
           const chatMessage = createChatTemplate(token, messages, opacity);
           postChat(chatMessage);
         }
       });
     }
+  }
+
+  /**
+   * @param {object[]} tokens array of token objects
+   * @returns {boolean}
+   */
+  const tokenPageHasDynamicLighting = (tokens) => {
+    const page = getPageOfToken(tokens[0]);
+    return page.get('dynamic_lighting_enabled');
   }
 
   const createChatTemplate = (token, messages, opacity) => {
@@ -199,7 +284,7 @@ const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
 
   const postChat = (chatText, whisper = 'gm') => {
     const whisperText = whisper ? `/w "${whisper}" ` : '';
-    sendChat(scriptName, `${whisperText}${chatText}`);
+    sendChat(scriptName, `${whisperText}${chatText}`, null, { noarchive: true });
   }
 
   /**
@@ -218,30 +303,38 @@ const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
     const token = tokenOrTokenId && typeof(tokenOrTokenId) === 'object' && tokenOrTokenId.id ? tokenOrTokenId
       : typeof(tokenOrTokenId) === 'string' ? getObj('graphic', tokenOrTokenId)
       : null;
-    const checkResult = token && token.id ? checkLightLevelOfToken(token)
+    const { litBy, err } = token && token.id
+      ? checkLightLevelOfToken(token)
       : { err: `Could not find token from supplied ID.` };
-    Object.assign(output, checkResult ? checkResult : { err: `Could not find token's page, or bad page data.` });
+    Object.assign(output,
+      litBy || err
+    );
     return output;
   }
 
   // Meta toolbox plugin
   const checklight = (msg) => {
-    const err = [];
+    const errors = [];
     const tokens = getSelectedTokens(msg.selected),
       token = tokens ? tokens[0] : null;
-    if (!token || !token.id) err.push(`checklight plugin: no selected token`);
+    if (!token || !token.id) errors.push(`Checklight plugin: No selected token`);
     else {
-      const checkResult = checkLightLevelOfToken(token);
-      return typeof(checkResult.total) === 'number' ? parseFloat(checkResult.total).toFixed(4) : 0;
+      const { litBy, err } = checkLightLevelOfToken(token);
+      if (litBy) {
+        return typeof(litBy.total) === 'number'
+          ? parseFloat(litBy.total).toFixed(4)
+          : 0;
+      }
+      else errors.push(err);
     }
-    if (err.length) err.forEach(e => log(e));
+    if (errors.length) errors.forEach(e => log(e));
     return '';
   }
   const registerWithMetaToolbox = () => {
     try {
       Plugger.RegisterRule(checklight);
-      // console.info(`Registered with Plugger`);
-      }
+      debug.info(`Registered with Plugger`);
+    }
     catch (e) { log(`ERROR Registering ${scriptName} with PlugEval: ${e.message}`); }
   }
 
@@ -254,3 +347,4 @@ const checkLightLevel = (() => { //eslint-disable-line no-unused-vars
   return { isLitBy }
 
 })();
+{ try { throw new Error(''); } catch (e) { API_Meta.checkLightLevel.lineCount = (parseInt(e.stack.split(/\n/)[1].replace(/^.*:(\d+):.*$/, '$1'), 10) - API_Meta.checkLightLevel.offset); } }
